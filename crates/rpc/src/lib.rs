@@ -205,6 +205,8 @@ pub mod methods {
     /// One page of a repository's open pull requests (`filter`, `after`
     /// cursor), with the total count.
     pub const LIST_CHANGE_REQUEST_PAGE: &str = "ListChangeRequestPage";
+    /// Contribution overview for the signed-in GitHub account.
+    pub const GET_GITHUB_ACTIVITY: &str = "GetGitHubActivity";
     /// Resolve a selected checkout through local Git metadata only.
     pub const GET_CHANGE_REQUEST_REPOSITORY: &str = "GetChangeRequestRepository";
     pub const GET_CHANGE_REQUEST: &str = "GetChangeRequest";

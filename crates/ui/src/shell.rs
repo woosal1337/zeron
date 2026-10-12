@@ -1933,6 +1933,8 @@ pub struct Shell {
     sidebar_pane: Entity<SidebarPane>,
     transcript: Entity<Transcript>,
     composer: Entity<Composer>,
+    github_activity: Entity<crate::github_activity::GitHubActivity>,
+    _github_activity_sub: gpui::Subscription,
     /// The window's voice orchestrator: independent of the selected chat.
     voice: Entity<crate::voice::VoiceController>,
     /// Sidebar footer orb (session live) and the full-window stage's orb.
@@ -2346,6 +2348,10 @@ impl Shell {
         let transcript = cx.new(|cx| Transcript::new(state.clone(), cx));
         transcript.update(cx, |transcript, _| transcript.retain_for_route_exit());
         let composer = cx.new(|cx| Composer::new(state.clone(), cx));
+        let github_activity = cx.new(|cx| {
+            crate::github_activity::GitHubActivity::new(state.clone(), cx)
+        });
+        let _github_activity_sub = cx.observe(&github_activity, |_, _, cx| cx.notify());
         let voice = cx.new(|_| crate::voice::VoiceController::default());
         let voice_footer_orb = cx.new(|_| {
             crate::orb::Orb::new()
@@ -2498,6 +2504,8 @@ impl Shell {
             sidebar_pane,
             transcript,
             composer,
+            github_activity,
+            _github_activity_sub,
             voice,
             voice_footer_orb,
             voice_stage_orb,
@@ -11177,6 +11185,31 @@ impl Shell {
         } else {
             None
         };
+        let viewport_height = self.viewport_height;
+        let surface = self.composer.read(cx).surface_bounds();
+        let activity_room = surface
+            .get()
+            .map(|bounds| {
+                let bottom = f32::from(bounds.top()) + f32::from(bounds.size.height);
+                viewport_height - bottom - 28.0 - term_h
+            })
+            .unwrap_or(0.0);
+        let activity_anchor = self.github_activity.read(cx).anchor_height();
+        if let Some(bounds) = surface.get() {
+            activity_anchor.set(f32::from(bounds.size.height));
+        }
+        let activity_home = matches!(self.route, Route::Chat)
+            && (has_spaces || no_project || has_appshots)
+            && dock_frame.selectors() > 0.001
+            && (!has_selection || dock_frame.active);
+        self.github_activity
+            .update(cx, |activity, cx| activity.set_frame(activity_home, activity_room, cx));
+        let show_activity = activity_home
+            && crate::github_activity::activity_mounts(
+                activity_anchor.get(),
+                activity_room,
+                self.github_activity.read(cx).has_snapshot(),
+            );
         let status = div()
             .relative()
             .left(px(-session_reserve / 2.0))
@@ -11291,6 +11324,36 @@ impl Shell {
             // transcript clearance. The flex_1 spacer has no id/listeners, so
             // pointer + wheel events over it fall through to the list below.
             .child(div().flex_1().min_h_0())
+            .when(show_activity, |column| {
+                let fade = (if has_selection {
+                    1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
+                } else {
+                    dock_frame.selectors()
+                }) * self.composer_dock.borrow().opacity();
+                let top = surface.get().map(|bounds| {
+                    f32::from(bounds.top()) + f32::from(bounds.size.height) + 28.0
+                });
+                let Some(top) = top else {
+                    return column;
+                };
+                column.child(
+                    div()
+                        .absolute()
+                        .top(px(top))
+                        .left_0()
+                        .right_0()
+                        .flex()
+                        .justify_center()
+                        .opacity(fade)
+                        .child(
+                            div()
+                                .relative()
+                                .left(px(-session_reserve / 2.0))
+                                .w(px(composer_width))
+                                .child(self.github_activity.clone()),
+                        ),
+                )
+            })
             .child({
                 let measured = self.bottom_stack.clone();
                 let measured_has_composer = self.bottom_stack_has_composer.clone();

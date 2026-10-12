@@ -1489,6 +1489,7 @@ fn forwardable(method: &str) -> bool {
             | methods::WATCH_WORKSPACE_GIT_STATUS
             | methods::WATCH_CHECKOUT_CHANGE_REQUEST
             | methods::LIST_CHANGE_REQUEST_PAGE
+            | methods::GET_GITHUB_ACTIVITY
             | methods::GET_CHANGE_REQUEST_REPOSITORY
             | methods::GET_CHANGE_REQUEST
             | methods::GET_CHANGE_REQUEST_DIFF
@@ -2597,6 +2598,29 @@ impl RpcService for EngineRpc {
                     None => resolver.repository_for_checkout(cwd).await,
                 };
                 RpcReply::value(&repository)
+            }
+            methods::GET_GITHUB_ACTIVITY => {
+                #[derive(Deserialize)]
+                #[serde(rename_all = "camelCase")]
+                struct P {
+                    period: zeron_proto::GitHubActivityPeriod,
+                    #[serde(default)]
+                    repository: Option<String>,
+                    #[serde(default)]
+                    refresh: bool,
+                }
+                let p: P = parse_params(params)?;
+                if p.repository.as_deref().is_some_and(|repository| {
+                    !crate::source_control::valid_pr_repository(repository)
+                }) {
+                    return Err(RpcError::BadParams("repository must be owner/repo".into()));
+                }
+                let snapshot = self
+                    .github
+                    .github_activity(p.period, p.repository, p.refresh)
+                    .await
+                    .map_err(change_request_rpc_error)?;
+                RpcReply::value(&snapshot)
             }
             methods::LIST_CHANGE_REQUEST_PAGE => {
                 #[derive(Deserialize)]
@@ -4237,6 +4261,8 @@ mod tests {
         assert!(forwardable(methods::APPLY_HARNESS_UPDATE));
         assert!(forwardable(methods::LIST_CHANGE_REQUEST_PAGE));
         assert!(!is_stream_method(methods::LIST_CHANGE_REQUEST_PAGE));
+        assert!(forwardable(methods::GET_GITHUB_ACTIVITY));
+        assert!(!is_stream_method(methods::GET_GITHUB_ACTIVITY));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_REPOSITORY));
         assert!(forwardable(methods::GET_CHANGE_REQUEST));
         assert!(forwardable(methods::GET_CHANGE_REQUEST_DIFF));
@@ -4284,6 +4310,10 @@ mod tests {
         );
         assert_eq!(
             forward_deadline(methods::LIST_CHANGE_REQUEST_PAGE),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            forward_deadline(methods::GET_GITHUB_ACTIVITY),
             Duration::from_secs(30)
         );
     }
