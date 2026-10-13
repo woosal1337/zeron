@@ -4,7 +4,7 @@ use zeron_proto::{
     GitHubActivityDay, GitHubActivitySnapshot, GitHubActivityStat, GitHubActivityWeek,
 };
 
-pub(crate) const ACTIVITY_QUERY: &str = "query($from:DateTime!,$to:DateTime!,$prevFrom:DateTime!,$yearFrom:DateTime!,$opened:String!,$openedPrev:String!,$merged:String!,$mergedPrev:String!){viewer{contributionsCollection(from:$from,to:$to){contributionCalendar{totalContributions}totalPullRequestReviewContributions}previous:contributionsCollection(from:$prevFrom,to:$from){contributionCalendar{totalContributions}totalPullRequestReviewContributions}year:contributionsCollection(from:$yearFrom,to:$to){contributionCalendar{totalContributions weeks{contributionDays{contributionLevel date weekday}}}}}opened:search(query:$opened,type:ISSUE,first:1){issueCount}openedPrev:search(query:$openedPrev,type:ISSUE,first:1){issueCount}merged:search(query:$merged,type:ISSUE,first:1){issueCount}mergedPrev:search(query:$mergedPrev,type:ISSUE,first:1){issueCount}}";
+pub(crate) const ACTIVITY_QUERY: &str = "query($from:DateTime!,$to:DateTime!,$prevFrom:DateTime!,$yearFrom:DateTime!,$opened:String!,$openedPrev:String!,$merged:String!,$mergedPrev:String!){viewer{contributionsCollection(from:$from,to:$to){contributionCalendar{totalContributions}totalPullRequestReviewContributions}previous:contributionsCollection(from:$prevFrom,to:$from){contributionCalendar{totalContributions}totalPullRequestReviewContributions}year:contributionsCollection(from:$yearFrom,to:$to){contributionCalendar{weeks{contributionDays{contributionLevel date weekday}}}}}opened:search(query:$opened,type:ISSUE,first:1){issueCount}openedPrev:search(query:$openedPrev,type:ISSUE,first:1){issueCount}merged:search(query:$merged,type:ISSUE,first:1){issueCount}mergedPrev:search(query:$mergedPrev,type:ISSUE,first:1){issueCount}}";
 
 pub(crate) fn activity_variables(now: DateTime<Utc>) -> [(&'static str, String); 8] {
     let today = now.date_naive();
@@ -49,7 +49,6 @@ pub(crate) fn parse_activity(payload: &Value) -> Option<GitHubActivitySnapshot> 
             u32_at(data, &["mergedPrev", "issueCount"])?,
         ),
         reviews: stat(u32_at(current, &reviews)?, u32_at(previous, &reviews)?),
-        year_total: u32_at(calendar, &["totalContributions"])?,
         weeks: parse_weeks(calendar)?,
     })
 }
@@ -139,7 +138,6 @@ pub(crate) fn test_activity_payload() -> String {
                 },
                 "year": {
                     "contributionCalendar": {
-                        "totalContributions": 42,
                         "weeks": [
                             { "contributionDays": [
                                 day("2026-10-04", "NONE", 0),
@@ -199,7 +197,6 @@ mod tests {
         assert_eq!(counts(snapshot.pull_requests_opened), (5, 2));
         assert_eq!(counts(snapshot.pull_requests_merged), (2, 0));
         assert_eq!(counts(snapshot.reviews), (1, -2));
-        assert_eq!(snapshot.year_total, 42);
         assert_eq!(snapshot.weeks.len(), 2);
         assert_eq!(snapshot.weeks[1].days[1].level, 4);
         assert_eq!(snapshot.weeks[1].days[1].weekday, 1);

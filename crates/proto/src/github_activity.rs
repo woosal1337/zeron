@@ -28,6 +28,5 @@ pub struct GitHubActivitySnapshot {
     pub pull_requests_opened: GitHubActivityStat,
     pub pull_requests_merged: GitHubActivityStat,
     pub reviews: GitHubActivityStat,
-    pub year_total: u32,
     pub weeks: Vec<GitHubActivityWeek>,
 }

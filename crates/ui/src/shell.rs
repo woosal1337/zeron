@@ -16554,7 +16554,6 @@ mod exit_regressions {
             pull_requests_opened: stat,
             pull_requests_merged: stat,
             reviews: stat,
-            year_total: 8448,
             weeks: (0..53)
                 .map(|_| zeron_proto::GitHubActivityWeek {
                     days: (0..7).map(day).collect(),

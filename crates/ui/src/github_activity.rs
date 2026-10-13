@@ -8,7 +8,7 @@ use crate::state::AppState;
 use crate::theme::Theme;
 
 const MIN_WIDTH: f32 = 600.0;
-const PANEL_CHROME: f32 = 164.0;
+const PANEL_CHROME: f32 = 146.0;
 const REFRESH_AFTER: Duration = Duration::from_secs(5 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const IDLE_REFRESH: Duration = Duration::from_secs(30);
@@ -228,7 +228,7 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
             .and_then(|day| month_abbr(&day.date))
     });
     div()
-        .mt(px(4.0))
+        .mt(px(14.0))
         .w_full()
         .child(
             div()
@@ -309,18 +309,6 @@ impl Render for GitHubActivity {
                         snapshot.pull_requests_merged,
                     ))
                     .child(stat_column(theme, "Reviews", snapshot.reviews)),
-            )
-            .child(
-                div()
-                    .mt(px(10.0))
-                    .whitespace_nowrap()
-                    .text_size(crate::typography::ui_rems(13.0))
-                    .line_height(px(18.0))
-                    .text_color(theme.text)
-                    .child(SharedString::from(format!(
-                        "{} contributions in the last year",
-                        grouped(snapshot.year_total)
-                    ))),
             )
             .child(heatmap(snapshot, theme, cell))
     }
