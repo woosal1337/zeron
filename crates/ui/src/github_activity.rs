@@ -265,30 +265,12 @@ fn heat_legend(theme: &Theme) -> gpui::Div {
 }
 
 fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui::Div {
-    let mut seen_month: Option<&str> = None;
-    let month_marks: Vec<Option<&str>> = snapshot
-        .weeks
-        .iter()
-        .map(|week| {
-            let started = week
-                .days
-                .iter()
-                .find(|day| day.date.ends_with("-01"))
-                .and_then(|day| month_abbr(&day.date));
-            let month = started.or_else(|| {
-                seen_month
-                    .is_none()
-                    .then(|| week.days.first().and_then(|day| month_abbr(&day.date)))
-                    .flatten()
-            });
-            if month.is_some() && month != seen_month {
-                seen_month = month;
-                month
-            } else {
-                None
-            }
-        })
-        .collect();
+    let month_marks = snapshot.weeks.iter().map(|week| {
+        week.days
+            .iter()
+            .find(|day| day.date.ends_with("-01"))
+            .and_then(|day| month_abbr(&day.date))
+    });
     let label = |text: &'static str| {
         div()
             .h(px(cell))
@@ -307,27 +289,22 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
                 .gap(px(4.0))
                 .mb(px(2.0))
                 .child(div().w(px(28.0)))
-                .child(
+                .child(div().flex().gap(px(2.0)).children(month_marks.map(|mark| {
                     div()
-                        .flex()
-                        .gap(px(2.0))
-                        .children(month_marks.into_iter().map(|mark| {
+                        .relative()
+                        .w(px(cell))
+                        .h(px(14.0))
+                        .children(mark.map(|text| {
                             div()
-                                .relative()
-                                .w(px(cell))
-                                .h(px(14.0))
-                                .children(mark.map(|text| {
-                                    div()
-                                        .absolute()
-                                        .top_0()
-                                        .left_0()
-                                        .whitespace_nowrap()
-                                        .text_size(crate::typography::ui_rems(11.0))
-                                        .text_color(theme.text_muted)
-                                        .child(SharedString::from(text))
-                                }))
-                        })),
-                ),
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .whitespace_nowrap()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(text))
+                        }))
+                }))),
         )
         .child(
             div()
