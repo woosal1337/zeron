@@ -28,7 +28,8 @@ const GIT_OUTPUT_LIMIT: usize = 64 * 1024;
 /// `ssh -G` only reads configuration; it never connects.
 const SSH_CONFIG_TIMEOUT: Duration = Duration::from_secs(3);
 /// `repository()` follows renames: the old name resolves to the current one.
-const GITHUB_REPOSITORY_QUERY: &str = "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
+const GITHUB_REPOSITORY_QUERY: &str =
+    "query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { nameWithOwner } }";
 const GITHUB_OUTPUT_LIMIT: usize = 1024 * 1024;
 const GITHUB_RESULT_LIMIT: &str = "20";
 const GITHUB_JSON_FIELDS: &str = "number,title,url,state,baseRefName,headRefName,updatedAt,isCrossRepository,headRepositoryOwner";
@@ -763,38 +764,21 @@ impl GitHubCli {
 
     pub(crate) async fn github_activity(
         &self,
-        period: zeron_proto::GitHubActivityPeriod,
-        repository: Option<String>,
         refresh: bool,
     ) -> Result<zeron_proto::GitHubActivitySnapshot, ChangeRequestError> {
-        if repository
-            .as_deref()
-            .is_some_and(|repository| !valid_pr_repository(repository))
-        {
-            return Err(ChangeRequestError::UnsupportedRepository);
-        }
         let now = Utc::now();
-        let spec = crate::github_activity::activity_spec(period, repository.clone(), now)
-            .map_err(|_| ChangeRequestError::UnsupportedRepository)?;
-        let key = format!(
-            "activity:{period:?}:{}:{}",
-            repository.as_deref().unwrap_or_default(),
-            now.date_naive()
-        );
         let github = self.clone();
-        let fetch_spec = spec.clone();
         let payload = self
-            .cached_pr_request(key, refresh, async move {
-                github.fetch_github_activity(&fetch_spec).await
+            .cached_pr_request(format!("activity:{}", now.date_naive()), refresh, async move {
+                github.fetch_github_activity(now).await
             })
             .await?;
-        crate::github_activity::parse_activity(&payload, &spec)
-            .map_err(|_| ChangeRequestError::Decode)
+        crate::github_activity::parse_activity(&payload).ok_or(ChangeRequestError::Decode)
     }
 
     async fn fetch_github_activity(
         &self,
-        spec: &crate::github_activity::ActivitySpec,
+        now: DateTime<Utc>,
     ) -> Result<serde_json::Value, ChangeRequestError> {
         let mut args = vec![
             "api".to_owned(),
@@ -802,7 +786,7 @@ impl GitHubCli {
             "-f".to_owned(),
             format!("query={}", crate::github_activity::ACTIVITY_QUERY),
         ];
-        for (name, value) in spec.variables() {
+        for (name, value) in crate::github_activity::activity_variables(now) {
             args.push("-f".to_owned());
             args.push(format!("{name}={value}"));
         }
@@ -936,9 +920,7 @@ impl GitHubCli {
         {
             return Ok(page);
         }
-        let page = self
-            .fetch_list_page(repository, filter, after, refresh)
-            .await?;
+        let page = self.fetch_list_page(repository, filter, after, refresh).await?;
         if let Some((store, account)) = stored {
             store.save(&account, repository, filter, &page).await;
         }
@@ -2303,41 +2285,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_activity_reads_scoped_counts_and_reuses_the_cache() {
+    async fn github_activity_reads_counts_and_reuses_the_cache() {
         let payload = crate::github_activity::test_activity_payload();
-        let runner = FakeProcessRunner::with_responses([
-            command_success(payload.clone()),
-            command_success(payload),
-        ]);
+        let runner = FakeProcessRunner::with_responses([command_success(payload)]);
         let github = GitHubCli::with_runner(runner.clone() as std::sync::Arc<dyn ProcessRunner>);
-        let period = zeron_proto::GitHubActivityPeriod::Week;
-        let first = github
-            .github_activity(period, Some("acme/repo".into()), false)
-            .await
-            .unwrap();
-        assert_eq!(first.contributions.count, 6);
+        let first = github.github_activity(false).await.unwrap();
+        assert_eq!(first.contributions.count, 10);
         assert_eq!(first.pull_requests_opened.count, 5);
-        assert_eq!(first.attention_count, 1);
-        assert_eq!(runner.requests().len(), 1);
-        let again = github
-            .github_activity(period, Some("acme/repo".into()), false)
-            .await
-            .unwrap();
+        let again = github.github_activity(false).await.unwrap();
         assert_eq!(again, first);
         assert_eq!(runner.requests().len(), 1);
-        let all = github.github_activity(period, None, false).await.unwrap();
-        assert_eq!(all.contributions.count, 10);
-        assert_eq!(runner.requests().len(), 2);
-        let scoped = runner.requests()[0].args.join(" ");
-        assert!(scoped.contains("repo:acme/repo"));
-        assert!(scoped.contains("author:@me is:pr"));
-        assert!(scoped.contains("contributionCalendar"));
-        assert!(
-            !runner.requests()[1]
-                .args
-                .join(" ")
-                .contains("repo:acme/repo")
-        );
+        let args = runner.requests()[0].args.join(" ");
+        assert!(args.contains("author:@me is:pr"));
+        assert!(args.contains("contributionCalendar"));
         assert_eq!(runner.requests()[0].program, "gh");
         assert_eq!(runner.requests()[0].timeout, GITHUB_TIMEOUT);
         assert!(
@@ -2349,23 +2309,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn github_activity_rejects_a_bad_repository_before_launch() {
-        let runner =
-            FakeProcessRunner::with_responses(None::<Result<ProcessOutput, ProcessRunError>>);
-        let github = GitHubCli::with_runner(runner.clone() as std::sync::Arc<dyn ProcessRunner>);
-        let error = github
-            .github_activity(
-                zeron_proto::GitHubActivityPeriod::Week,
-                Some("not a repo".into()),
-                false,
-            )
-            .await
-            .unwrap_err();
-        assert_eq!(error, ChangeRequestError::UnsupportedRepository);
-        assert!(runner.requests().is_empty());
-    }
-
-    #[tokio::test]
     async fn github_activity_reports_auth_and_missing_cli() {
         let auth = FakeProcessRunner::with_responses([Ok(ProcessOutput {
             success: false,
@@ -2374,21 +2317,16 @@ mod tests {
             stdout_truncated: false,
         })]);
         let github = GitHubCli::with_runner(auth as std::sync::Arc<dyn ProcessRunner>);
-        let error = github
-            .github_activity(zeron_proto::GitHubActivityPeriod::Month, None, false)
-            .await
-            .unwrap_err();
+        let error = github.github_activity(false).await.unwrap_err();
         assert_eq!(error, ChangeRequestError::Authentication);
         let missing = FakeProcessRunner::with_responses([Err(ProcessRunError::Spawn(
             std::io::ErrorKind::NotFound,
         ))]);
         let github = GitHubCli::with_runner(missing as std::sync::Arc<dyn ProcessRunner>);
-        let error = github
-            .github_activity(zeron_proto::GitHubActivityPeriod::Month, None, false)
-            .await
-            .unwrap_err();
+        let error = github.github_activity(false).await.unwrap_err();
         assert_eq!(error, ChangeRequestError::CliUnavailable);
     }
+
     #[tokio::test]
     async fn github_activity_accepts_a_payload_that_also_reports_errors() {
         let mut payload: serde_json::Value =
@@ -2401,12 +2339,9 @@ mod tests {
             stdout_truncated: false,
         })]);
         let github = GitHubCli::with_runner(runner as std::sync::Arc<dyn ProcessRunner>);
-        let snapshot = github
-            .github_activity(zeron_proto::GitHubActivityPeriod::Week, None, false)
-            .await
-            .unwrap();
+        let snapshot = github.github_activity(false).await.unwrap();
         assert_eq!(snapshot.contributions.count, 10);
-        assert_eq!(snapshot.reviews.count, 0);
+        assert_eq!(snapshot.reviews.count, 1);
     }
 
     /// Real engine dispatch, wire envelopes and GitHub decoding; only subprocess
@@ -2846,8 +2781,9 @@ mod tests {
 
     #[tokio::test]
     async fn ssh_alias_remote_matches_through_ssh_config() {
-        let runner =
-            FakeProcessRunner::with_responses([command_success("user git\nhostname github.com\n")]);
+        let runner = FakeProcessRunner::with_responses([command_success(
+            "user git\nhostname github.com\n",
+        )]);
         let resolver = ChangeRequestResolver {
             inspector: GitCheckoutInspector::new(runner.clone()),
             github: GitHubCli::with_runner(runner.clone()),
@@ -2870,10 +2806,7 @@ mod tests {
                 .as_deref(),
             Some("acme/zeron")
         );
-        assert_eq!(
-            resolver.github_slug("https://gitlab.com/acme/zeron").await,
-            None
-        );
+        assert_eq!(resolver.github_slug("https://gitlab.com/acme/zeron").await, None);
         assert_eq!(runner.requests().len(), 1);
     }
 
@@ -3341,13 +3274,7 @@ mod tests {
         assert_eq!(first.next_cursor.as_deref(), Some("Y3Vyc29yOjUw"));
         assert_eq!(first.total_count, Some(120));
         let second = github
-            .list_page(
-                "acme/zeron",
-                filter,
-                first.next_cursor.as_deref(),
-                false,
-                false,
-            )
+            .list_page("acme/zeron", filter, first.next_cursor.as_deref(), false, false)
             .await
             .unwrap();
         assert_eq!(second.items[0].number, 2);
@@ -4085,10 +4012,7 @@ printf '%s\n' '[{"number":90,"title":"Host-resolved pull request","url":"https:/
             ],
         );
         run_git(&checkout, &["config", "branch.main.remote", "upstream"]);
-        run_git(
-            &checkout,
-            &["config", "branch.main.merge", "refs/heads/main"],
-        );
+        run_git(&checkout, &["config", "branch.main.merge", "refs/heads/main"]);
 
         let resolver = ChangeRequestResolver::new();
         let source = resolver

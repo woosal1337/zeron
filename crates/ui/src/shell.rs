@@ -11186,30 +11186,25 @@ impl Shell {
             None
         };
         let viewport_height = self.viewport_height;
-        let surface = self.composer.read(cx).surface_bounds();
-        let activity_room = surface
+        let surface = self
+            .composer
+            .read(cx)
+            .surface_bounds()
             .get()
-            .map(|bounds| {
-                let bottom = f32::from(bounds.top()) + f32::from(bounds.size.height);
-                viewport_height - bottom - 28.0 - term_h
-            })
-            .unwrap_or(0.0);
-        let activity_anchor = self.github_activity.read(cx).anchor_height();
-        if let Some(bounds) = surface.get() {
-            activity_anchor.set(f32::from(bounds.size.height));
-        }
+            .filter(|bounds| f32::from(bounds.size.height) > 40.0);
         let activity_home = matches!(self.route, Route::Chat)
             && (has_spaces || no_project || has_appshots)
             && dock_frame.selectors() > 0.001
             && (!has_selection || dock_frame.active);
-        self.github_activity
-            .update(cx, |activity, cx| activity.set_frame(activity_home, activity_room, cx));
-        let show_activity = activity_home
-            && crate::github_activity::activity_mounts(
-                activity_anchor.get(),
-                activity_room,
-                self.github_activity.read(cx).has_snapshot(),
-            );
+        let activity_frame = surface.filter(|_| activity_home).map(|bounds| {
+            let top = f32::from(bounds.bottom()) + 28.0;
+            (top, f32::from(bounds.size.width), viewport_height - top - term_h)
+        });
+        self.github_activity.update(cx, |activity, cx| {
+            let (_, width, room) = activity_frame.unwrap_or_default();
+            activity.set_frame(activity_frame.is_some(), room, width, cx);
+        });
+        let activity_frame = activity_frame.filter(|_| self.github_activity.read(cx).visible());
         let status = div()
             .relative()
             .left(px(-session_reserve / 2.0))
@@ -11288,10 +11283,14 @@ impl Shell {
             )
             .children(session_card)
             .when_some(harness_update_card, |column, chip| {
-                // Home notices stay anchored to the window bottom, behind the
-                // dock. Clip paint and hitboxes at the same measured terminal
-                // edge as the transcript, including during open/close motion;
+                // Home notices sit above the composer's destination selectors.
+                // Clip paint and hitboxes at the same measured terminal edge
+                // as the transcript, including during open/close motion;
                 // draw order alone would show them through the terminal glass.
+                let Some(bounds) = surface else {
+                    return column;
+                };
+                let bottom = self.viewport_height - f32::from(bounds.top()) + 36.0;
                 column.child(
                     div()
                         .absolute()
@@ -11303,7 +11302,7 @@ impl Shell {
                                         .absolute()
                                         .left_0()
                                         .right_0()
-                                        .bottom(px(24.0 - 8.0 * (1.0 - chip_opacity)))
+                                        .bottom(px(bottom - 8.0 * (1.0 - chip_opacity)))
                                         .opacity(chip_opacity)
                                         .flex()
                                         .justify_center()
@@ -11324,18 +11323,12 @@ impl Shell {
             // transcript clearance. The flex_1 spacer has no id/listeners, so
             // pointer + wheel events over it fall through to the list below.
             .child(div().flex_1().min_h_0())
-            .when(show_activity, |column| {
+            .when_some(activity_frame, |column, (top, pill_width, _)| {
                 let fade = (if has_selection {
                     1.0 - crate::composer_dock::stage(dock_frame.dissolve(), 0.0, 0.22)
                 } else {
                     dock_frame.selectors()
                 }) * self.composer_dock.borrow().opacity();
-                let top = surface.get().map(|bounds| {
-                    f32::from(bounds.top()) + f32::from(bounds.size.height) + 28.0
-                });
-                let Some(top) = top else {
-                    return column;
-                };
                 column.child(
                     div()
                         .absolute()
@@ -11349,7 +11342,7 @@ impl Shell {
                             div()
                                 .relative()
                                 .left(px(-session_reserve / 2.0))
-                                .w(px(composer_width))
+                                .w(px(pill_width))
                                 .child(self.github_activity.clone()),
                         ),
                 )

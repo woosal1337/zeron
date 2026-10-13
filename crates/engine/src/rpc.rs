@@ -2601,23 +2601,14 @@ impl RpcService for EngineRpc {
             }
             methods::GET_GITHUB_ACTIVITY => {
                 #[derive(Deserialize)]
-                #[serde(rename_all = "camelCase")]
                 struct P {
-                    period: zeron_proto::GitHubActivityPeriod,
-                    #[serde(default)]
-                    repository: Option<String>,
                     #[serde(default)]
                     refresh: bool,
                 }
                 let p: P = parse_params(params)?;
-                if p.repository.as_deref().is_some_and(|repository| {
-                    !crate::source_control::valid_pr_repository(repository)
-                }) {
-                    return Err(RpcError::BadParams("repository must be owner/repo".into()));
-                }
                 let snapshot = self
                     .github
-                    .github_activity(p.period, p.repository, p.refresh)
+                    .github_activity(p.refresh)
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&snapshot)

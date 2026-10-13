@@ -1,28 +1,18 @@
 //! GitHub activity under the empty new-chat composer.
-use std::cell::Cell;
-use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{
-    Context, Entity, IntoElement, Render, ScrollHandle, SharedString, Window, div, prelude::*, px,
-};
-use zeron_proto::{
-    GitHubActivityPeak, GitHubActivityPeriod, GitHubActivitySnapshot, GitHubActivityStat,
-};
+use gpui::{Context, Entity, IntoElement, Render, SharedString, Window, div, prelude::*, px};
+use zeron_proto::{GitHubActivitySnapshot, GitHubActivityStat};
 use zeron_rpc::methods;
 
-use crate::popover;
 use crate::state::AppState;
 use crate::theme::Theme;
 
-pub(crate) const ACTIVITY_MIN_ROOM: f32 = 150.0;
+const MIN_WIDTH: f32 = 600.0;
+const PANEL_CHROME: f32 = 164.0;
 const REFRESH_AFTER: Duration = Duration::from_secs(5 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const IDLE_REFRESH: Duration = Duration::from_secs(30);
-
-pub(crate) fn activity_mounts(anchor: f32, room: f32, has_snapshot: bool) -> bool {
-    anchor > 40.0 && room >= ACTIVITY_MIN_ROOM && has_snapshot
-}
 
 fn grouped(value: u32) -> String {
     let digits = value.to_string();
@@ -47,104 +37,40 @@ fn format_delta(delta: i32) -> String {
     }
 }
 
-fn day_count(days: u32) -> String {
-    if days == 1 {
-        "1 day".to_owned()
-    } else {
-        format!("{days} days")
-    }
-}
-
-fn period_label(period: GitHubActivityPeriod) -> &'static str {
-    match period {
-        GitHubActivityPeriod::Week => "This week",
-        GitHubActivityPeriod::Month => "This month",
-        GitHubActivityPeriod::Year => "This year",
-    }
-}
-
-fn delta_caption(period: GitHubActivityPeriod) -> &'static str {
-    match period {
-        GitHubActivityPeriod::Week => "vs last week",
-        GitHubActivityPeriod::Month => "vs last month",
-        GitHubActivityPeriod::Year => "vs last year",
-    }
-}
-
-fn repo_label(repository: &Option<String>) -> String {
-    match repository {
-        Some(repository) => repository.clone(),
-        None => "All repositories".to_owned(),
-    }
-}
-
 pub struct GitHubActivity {
     state: Entity<AppState>,
-    anchor_height: Rc<Cell<f32>>,
-    panel_width: Rc<Cell<f32>>,
     shown: bool,
     room: f32,
-    period: GitHubActivityPeriod,
-    repository: Option<String>,
+    width: f32,
     snapshot: Option<GitHubActivitySnapshot>,
-    fetched_key: Option<String>,
     fetched_at: Option<Instant>,
     failed_at: Option<Instant>,
     hidden_at: Option<Instant>,
     loading: bool,
-    loading_key: Option<String>,
-    generation: u64,
-    period_open: bool,
-    repo_open: bool,
-    scroll: ScrollHandle,
-    repo_scroll: ScrollHandle,
 }
 
 impl GitHubActivity {
     pub fn new(state: Entity<AppState>, _cx: &mut Context<Self>) -> Self {
         Self {
             state,
-            anchor_height: Rc::new(Cell::new(0.0)),
-            panel_width: Rc::new(Cell::new(680.0)),
             shown: false,
             room: 0.0,
-            period: GitHubActivityPeriod::Week,
-            repository: None,
+            width: 0.0,
             snapshot: None,
-            fetched_key: None,
             fetched_at: None,
             failed_at: None,
             hidden_at: None,
             loading: false,
-            loading_key: None,
-            generation: 0,
-            period_open: false,
-            repo_open: false,
-            scroll: ScrollHandle::new(),
-            repo_scroll: ScrollHandle::new(),
         }
     }
 
-    pub fn anchor_height(&self) -> Rc<Cell<f32>> {
-        self.anchor_height.clone()
-    }
-
-    pub fn has_snapshot(&self) -> bool {
-        self.snapshot.is_some()
-    }
-
-    pub fn set_frame(&mut self, shown: bool, room: f32, cx: &mut Context<Self>) {
+    pub fn set_frame(&mut self, shown: bool, room: f32, width: f32, cx: &mut Context<Self>) {
         let resumed = shown && !self.shown;
         self.shown = shown;
         self.room = room;
-        if !shown || room < ACTIVITY_MIN_ROOM {
-            self.period_open = false;
-            self.repo_open = false;
-        }
+        self.width = width;
         if !shown {
-            if self.hidden_at.is_none() {
-                self.hidden_at = Some(Instant::now());
-            }
+            self.hidden_at.get_or_insert_with(Instant::now);
             return;
         }
         let idle = resumed
@@ -152,77 +78,55 @@ impl GitHubActivity {
                 .hidden_at
                 .take()
                 .is_some_and(|at| at.elapsed() >= IDLE_REFRESH);
-        self.hidden_at = None;
         self.ensure(idle, cx);
     }
 
-    fn request_key(&self) -> String {
-        format!(
-            "{:?}:{}",
-            self.period,
-            self.repository.as_deref().unwrap_or("")
-        )
+    pub fn visible(&self) -> bool {
+        self.cell().is_some()
+    }
+
+    fn cell(&self) -> Option<f32> {
+        let columns = self.snapshot.as_ref()?.weeks.len();
+        self.shown
+            .then(|| activity_cell(self.width, columns, self.room))
+            .flatten()
     }
 
     fn ensure(&mut self, force: bool, cx: &mut Context<Self>) {
-        if !self.shown {
+        if self.loading {
             return;
         }
-        let key = self.request_key();
-        if self.loading && self.loading_key.as_deref() == Some(key.as_str()) && !force {
-            return;
-        }
-        let same = self.fetched_key.as_deref() == Some(key.as_str());
         let fresh = self
             .fetched_at
             .is_some_and(|at| at.elapsed() < REFRESH_AFTER);
-        if !force && same && self.snapshot.is_some() && fresh {
+        let failed = self.failed_at.is_some_and(|at| at.elapsed() < RETRY_AFTER);
+        if !force && (fresh || failed) {
             return;
         }
-        if !force && self.failed_at.is_some_and(|at| at.elapsed() < RETRY_AFTER) {
-            return;
-        }
-        self.fetch(force || (same && self.snapshot.is_some()), key, cx);
-    }
-
-    fn fetch(&mut self, refresh: bool, key: String, cx: &mut Context<Self>) {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let period = self.period;
-        let repository = self.repository.clone();
+        let refresh = force || self.snapshot.is_some();
         self.loading = true;
-        self.loading_key = Some(key.clone());
-        self.generation = self.generation.wrapping_add(1);
-        let generation = self.generation;
         cx.spawn(async move |this, cx| {
-            let mut params = serde_json::json!({
-                "period": period,
-                "refresh": refresh,
-            });
-            if let Some(repository) = repository {
-                params["repository"] = serde_json::Value::String(repository);
-            }
             let result = engine
                 .client()
-                .call(methods::GET_GITHUB_ACTIVITY, params)
-                .await;
+                .call(
+                    methods::GET_GITHUB_ACTIVITY,
+                    serde_json::json!({ "refresh": refresh }),
+                )
+                .await
+                .ok()
+                .and_then(|value| serde_json::from_value::<GitHubActivitySnapshot>(value).ok());
             this.update(cx, |this, cx| {
-                if this.generation != generation {
-                    return;
-                }
                 this.loading = false;
                 match result {
-                    Ok(value) => match serde_json::from_value::<GitHubActivitySnapshot>(value) {
-                        Ok(snapshot) => {
-                            this.snapshot = Some(snapshot);
-                            this.fetched_key = Some(key);
-                            this.fetched_at = Some(Instant::now());
-                            this.failed_at = None;
-                        }
-                        Err(_) => this.failed_at = Some(Instant::now()),
-                    },
-                    Err(_) => this.failed_at = Some(Instant::now()),
+                    Some(snapshot) => {
+                        this.snapshot = Some(snapshot);
+                        this.fetched_at = Some(Instant::now());
+                        this.failed_at = None;
+                    }
+                    None => this.failed_at = Some(Instant::now()),
                 }
                 cx.notify();
             })
@@ -230,306 +134,77 @@ impl GitHubActivity {
         })
         .detach();
     }
-
-    fn toggle_period(&mut self, cx: &mut Context<Self>) {
-        self.period_open = !self.period_open;
-        if self.period_open {
-            self.repo_open = false;
-        }
-        cx.notify();
-    }
-
-    fn toggle_repo(&mut self, cx: &mut Context<Self>) {
-        self.repo_open = !self.repo_open;
-        if self.repo_open {
-            self.period_open = false;
-        }
-        cx.notify();
-    }
-
-    fn choose_period(&mut self, period: GitHubActivityPeriod, cx: &mut Context<Self>) {
-        self.period_open = false;
-        self.repo_open = false;
-        if self.period != period {
-            self.period = period;
-            self.ensure(true, cx);
-        }
-        cx.notify();
-    }
-
-    fn choose_repository(&mut self, repository: Option<String>, cx: &mut Context<Self>) {
-        self.period_open = false;
-        self.repo_open = false;
-        if self.repository != repository {
-            self.repository = repository;
-            self.ensure(true, cx);
-        }
-        cx.notify();
-    }
-
-    fn header(&self, theme: &Theme, cx: &mut Context<Self>) -> gpui::Div {
-        let period = self.period;
-        let repository = self.repository.clone();
-        let names = self
-            .snapshot
-            .as_ref()
-            .map(|snapshot| snapshot.repositories.clone())
-            .unwrap_or_default();
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .mb(px(8.0))
-            .child(
-                div()
-                    .text_size(crate::typography::ui_rems(14.0))
-                    .font_weight(gpui::FontWeight::MEDIUM)
-                    .text_color(theme.text)
-                    .child(SharedString::from("Overview")),
-            )
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(8.0))
-                    .child(self.period_menu(theme, period, cx))
-                    .child(self.repo_menu(theme, &repository, &names, cx)),
-            )
-    }
-
-    fn period_menu(
-        &self,
-        theme: &Theme,
-        period: GitHubActivityPeriod,
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let open = self.period_open;
-        div()
-            .relative()
-            .child(self.trigger(
-                theme,
-                period_label(period),
-                "github-activity-period",
-                cx,
-                true,
-            ))
-            .when(open, |menu| {
-                menu.child(
-                    div().absolute().top(px(26.0)).right_0().occlude().child(
-                        popover::popover_card(theme).min_w(px(148.0)).children(
-                            [
-                                GitHubActivityPeriod::Week,
-                                GitHubActivityPeriod::Month,
-                                GitHubActivityPeriod::Year,
-                            ]
-                            .map(|item| {
-                                let selected = item == period;
-                                div()
-                                    .px(px(8.0))
-                                    .py(px(6.0))
-                                    .rounded(px(8.0))
-                                    .cursor_pointer()
-                                    .bg(if selected {
-                                        theme.surface_raised
-                                    } else {
-                                        gpui::transparent_black()
-                                    })
-                                    .child(SharedString::from(period_label(item)))
-                                    .id(match item {
-                                        GitHubActivityPeriod::Week => "github-activity-week",
-                                        GitHubActivityPeriod::Month => "github-activity-month",
-                                        GitHubActivityPeriod::Year => "github-activity-year",
-                                    })
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.choose_period(item, cx);
-                                    }))
-                            }),
-                        ),
-                    ),
-                )
-            })
-    }
-
-    fn repo_menu(
-        &self,
-        theme: &Theme,
-        repository: &Option<String>,
-        names: &[String],
-        cx: &mut Context<Self>,
-    ) -> gpui::Div {
-        let open = self.repo_open;
-        let label = repo_label(repository);
-        let selected_name = repository.clone();
-        div()
-            .relative()
-            .child(self.trigger(theme, &label, "github-activity-repo", cx, false))
-            .when(open, |menu| {
-                let rows = std::iter::once(None::<String>)
-                    .chain(names.iter().cloned().map(Some))
-                    .map(|name| {
-                        let selected = name == selected_name;
-                        let shown = repo_label(&name);
-                        div()
-                            .px(px(8.0))
-                            .py(px(6.0))
-                            .rounded(px(8.0))
-                            .cursor_pointer()
-                            .bg(if selected {
-                                theme.surface_raised
-                            } else {
-                                gpui::transparent_black()
-                            })
-                            .child(SharedString::from(shown))
-                            .id(SharedString::from(format!(
-                                "github-activity-repo-{}",
-                                name.as_deref().unwrap_or("all")
-                            )))
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                this.choose_repository(name.clone(), cx);
-                            }))
-                            .into_any_element()
-                    });
-                menu.child(
-                    div().absolute().top(px(26.0)).right_0().occlude().child(
-                        popover::popover_card(theme).min_w(px(220.0)).child(
-                            popover::menu_scroll_list("github-activity-repos", &self.repo_scroll)
-                                .max_h(px(240.0))
-                                .flex()
-                                .flex_col()
-                                .children(rows),
-                        ),
-                    ),
-                )
-            })
-    }
-
-    fn trigger(
-        &self,
-        theme: &Theme,
-        label: &str,
-        id: &'static str,
-        cx: &mut Context<Self>,
-        period: bool,
-    ) -> impl IntoElement {
-        div()
-            .id(id)
-            .flex()
-            .items_center()
-            .gap(px(4.0))
-            .max_w(px(200.0))
-            .cursor_pointer()
-            .text_size(crate::typography::ui_rems(12.0))
-            .text_color(theme.text_muted)
-            .child(SharedString::from(format!("{label} ▾")))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                if period {
-                    this.toggle_period(cx);
-                } else {
-                    this.toggle_repo(cx);
-                }
-            }))
-    }
 }
 
 fn delta_color(theme: &Theme, delta: i32) -> gpui::Hsla {
     if delta > 0 {
         theme.success
+    } else if delta < 0 {
+        theme.danger
     } else {
         theme.text_muted
     }
 }
 
-fn stat_row(theme: &Theme, label: &str, stat: GitHubActivityStat, caption: &str) -> gpui::Div {
+fn stat_column(theme: &Theme, label: &str, stat: GitHubActivityStat) -> gpui::Div {
     div()
+        .flex_1()
+        .min_w_0()
         .flex()
-        .items_center()
-        .justify_between()
-        .h(px(22.0))
+        .flex_col()
+        .gap(px(2.0))
         .child(
             div()
-                .text_size(crate::typography::ui_rems(13.0))
+                .whitespace_nowrap()
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(px(16.0))
                 .text_color(theme.text_muted)
                 .child(SharedString::from(label.to_owned())),
         )
         .child(
             div()
+                .whitespace_nowrap()
+                .text_size(crate::typography::ui_rems(22.0))
+                .line_height(px(26.0))
+                .font_weight(gpui::FontWeight::MEDIUM)
+                .text_color(theme.text)
+                .child(SharedString::from(grouped(stat.count))),
+        )
+        .child(
+            div()
                 .flex()
+                .flex_nowrap()
                 .items_center()
-                .gap(px(8.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(13.0))
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.text)
-                        .child(SharedString::from(grouped(stat.count))),
-                )
+                .h(px(16.0))
+                .gap(px(4.0))
+                .whitespace_nowrap()
                 .when(stat.delta != 0, |row| {
                     row.child(
                         div()
+                            .flex_none()
                             .w(px(6.0))
                             .h(px(6.0))
                             .rounded(px(3.0))
-                            .bg(if stat.delta > 0 {
-                                theme.success
-                            } else {
-                                theme.danger
-                            }),
+                            .bg(delta_color(theme, stat.delta)),
                     )
                 })
                 .child(
                     div()
                         .text_size(crate::typography::ui_rems(12.0))
                         .text_color(delta_color(theme, stat.delta))
-                        .child(SharedString::from(format!(
-                            "{} {caption}",
-                            format_delta(stat.delta)
-                        ))),
+                        .child(SharedString::from(format_delta(stat.delta))),
+                )
+                .child(
+                    div()
+                        .text_size(crate::typography::ui_rems(12.0))
+                        .text_color(theme.text_muted)
+                        .child(SharedString::from("vs last month")),
                 ),
         )
 }
 
-fn metric(theme: &Theme, label: &str, value: String, detail: Option<String>) -> gpui::Div {
-    div()
-        .flex()
-        .flex_col()
-        .gap(px(2.0))
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_muted)
-                .child(SharedString::from(label.to_owned())),
-        )
-        .child(
-            div()
-                .text_size(crate::typography::ui_rems(14.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text)
-                .child(SharedString::from(value)),
-        )
-        .children(detail.map(|detail| {
-            div()
-                .text_size(crate::typography::ui_rems(12.0))
-                .text_color(theme.text_faint)
-                .child(SharedString::from(detail))
-        }))
-}
-
-fn peak_parts(peak: &Option<GitHubActivityPeak>) -> (String, Option<String>) {
-    match peak {
-        Some(peak) => (
-            peak.label.clone(),
-            Some(format!("{} contributions", grouped(peak.count))),
-        ),
-        None => ("—".to_owned(), None),
-    }
-}
-
-fn theme_dark(theme: &Theme) -> bool {
-    matches!(theme.appearance, crate::theme::Appearance::Dark)
-}
-
-fn heat_fill(dark: bool, level: u8) -> gpui::Rgba {
-    let colors: [u32; 5] = if dark {
+fn heat_fill(theme: &Theme, level: u8) -> gpui::Rgba {
+    let colors: [u32; 5] = if matches!(theme.appearance, crate::theme::Appearance::Dark) {
         [0x161B22, 0x0E4429, 0x006D32, 0x26A641, 0x39D353]
     } else {
         [0xEBEDF0, 0x9BE9A8, 0x40C463, 0x30A14E, 0x216E39]
@@ -539,30 +214,112 @@ fn heat_fill(dark: bool, level: u8) -> gpui::Rgba {
 
 fn heat_cell(width: f32, columns: usize) -> f32 {
     let columns = columns.max(1) as f32;
-    ((width - 44.0) / columns - 2.0).clamp(3.0, 10.0)
+    let gaps = (columns - 1.0).max(0.0) * 2.0;
+    ((width - 32.0 - gaps) / columns).max(2.0)
 }
 
-fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, width: f32) -> gpui::Div {
-    let columns = snapshot.weeks.len();
-    if columns == 0 {
-        return div();
+fn activity_cell(width: f32, columns: usize, room: f32) -> Option<f32> {
+    if width < MIN_WIDTH || columns == 0 {
+        return None;
     }
     let cell = heat_cell(width, columns);
-    let dark = theme_dark(theme);
-    let label = |text: &str| {
+    (PANEL_CHROME + 7.0 * cell <= room).then_some(cell)
+}
+
+fn month_abbr(date: &str) -> Option<&'static str> {
+    let month = date.get(5..7)?.parse::<usize>().ok()?;
+    [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ]
+    .get(month.checked_sub(1)?)
+    .copied()
+}
+
+fn heat_legend(theme: &Theme) -> gpui::Div {
+    let caption = |text: &'static str| {
+        div()
+            .text_size(crate::typography::ui_rems(11.0))
+            .text_color(theme.text_muted)
+            .child(SharedString::from(text))
+    };
+    div()
+        .flex()
+        .flex_none()
+        .items_center()
+        .gap(px(4.0))
+        .child(caption("Less"))
+        .children((0..5).map(|level| {
+            div()
+                .w(px(10.0))
+                .h(px(10.0))
+                .rounded(px(2.0))
+                .bg(heat_fill(theme, level))
+        }))
+        .child(caption("More"))
+}
+
+fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui::Div {
+    let mut seen_month: Option<&str> = None;
+    let month_marks: Vec<Option<&str>> = snapshot
+        .weeks
+        .iter()
+        .map(|week| {
+            let started = week
+                .days
+                .iter()
+                .find(|day| day.date.ends_with("-01"))
+                .and_then(|day| month_abbr(&day.date));
+            let month = started.or_else(|| {
+                seen_month
+                    .is_none()
+                    .then(|| week.days.first().and_then(|day| month_abbr(&day.date)))
+                    .flatten()
+            });
+            if month.is_some() && month != seen_month {
+                seen_month = month;
+                month
+            } else {
+                None
+            }
+        })
+        .collect();
+    let label = |text: &'static str| {
         div()
             .h(px(cell))
             .flex()
             .items_center()
             .text_size(crate::typography::ui_rems(11.0))
             .text_color(theme.text_muted)
-            .child(SharedString::from(text.to_owned()))
+            .child(SharedString::from(text))
     };
     div()
-        .mt(px(8.0))
+        .mt(px(4.0))
+        .w_full()
         .child(
             div()
                 .flex()
+                .gap(px(4.0))
+                .mb(px(2.0))
+                .child(div().w(px(28.0)))
+                .child(div().flex().gap(px(2.0)).children(month_marks.into_iter().map(
+                    |mark| {
+                        div().relative().w(px(cell)).h(px(14.0)).children(mark.map(|text| {
+                            div()
+                                .absolute()
+                                .top_0()
+                                .left_0()
+                                .whitespace_nowrap()
+                                .text_size(crate::typography::ui_rems(11.0))
+                                .text_color(theme.text_muted)
+                                .child(SharedString::from(text))
+                        }))
+                    },
+                ))),
+        )
+        .child(
+            div()
+                .flex()
+                .w_full()
                 .gap(px(4.0))
                 .child(
                     div()
@@ -570,226 +327,90 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, width: f32) -> gpui
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .child(label(""))
-                        .child(label("Mon"))
-                        .child(label(""))
-                        .child(label("Wed"))
-                        .child(label(""))
-                        .child(label("Fri"))
-                        .child(label("")),
+                        .children(["", "Mon", "", "Wed", "", "Fri", ""].map(label)),
                 )
                 .child(
                     div()
                         .flex()
                         .gap(px(2.0))
                         .children(snapshot.weeks.iter().map(|week| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .children((0..7).map(|row| {
-                                    let day = week.days.iter().find(|day| day.weekday == row);
-                                    let mut tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
-                                    if let Some(day) = day {
-                                        tile = tile.bg(heat_fill(dark, day.level));
-                                    }
-                                    tile
-                                }))
+                            div().flex().flex_col().gap(px(2.0)).children((0..7).map(|row| {
+                                let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
+                                match week.days.iter().find(|day| day.weekday == row) {
+                                    Some(day) => tile.bg(heat_fill(theme, day.level)),
+                                    None => tile,
+                                }
+                            }))
                         })),
-                ),
-        )
-        .child(
-            div()
-                .mt(px(6.0))
-                .flex()
-                .justify_end()
-                .items_center()
-                .gap(px(4.0))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("Less")),
-                )
-                .children((0..5).map(|level| {
-                    div()
-                        .w(px(10.0))
-                        .h(px(10.0))
-                        .rounded(px(2.0))
-                        .bg(heat_fill(dark, level))
-                }))
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(11.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("More")),
                 ),
         )
 }
 
 impl Render for GitHubActivity {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let snapshot = if self.shown && self.room >= ACTIVITY_MIN_ROOM {
-            self.snapshot.clone()
-        } else {
-            None
+        let (Some(snapshot), Some(cell)) = (self.snapshot.as_ref(), self.cell()) else {
+            return div();
         };
-        let Some(snapshot) = snapshot else {
-            return div().id("github-activity");
-        };
-        let theme = Theme::of(cx).clone();
-        let key = self.request_key();
-        let stale = self.loading && self.fetched_key.as_deref() != Some(key.as_str());
-        let width = self.panel_width.clone();
-        let caption = delta_caption(snapshot.period);
-        let (month_value, month_detail) = peak_parts(&snapshot.most_active_month);
-        let (day_value, day_detail) = peak_parts(&snapshot.most_active_weekday);
-        let attention_url = snapshot.attention_url.clone();
-        let attention_count = grouped(snapshot.attention_count);
+        let theme = Theme::of(cx);
         div()
-            .id("github-activity")
-            .relative()
             .w_full()
-            .opacity(if stale { 0.55 } else { 1.0 })
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                if this.period_open || this.repo_open {
-                    this.period_open = false;
-                    this.repo_open = false;
-                    cx.notify();
-                }
-            }))
-            .child(
-                gpui::canvas(
-                    move |bounds, window, _cx| {
-                        let next = f32::from(bounds.size.width);
-                        if next > 1.0 && (width.get() - next).abs() > 1.0 {
-                            width.set(next);
-                            window.request_animation_frame();
-                        }
-                    },
-                    |_, _, _, _| {},
-                )
-                .absolute()
-                .inset_0(),
-            )
-            .child(self.header(&theme, cx))
             .child(
                 div()
-                    .id("github-activity-scroll")
-                    .max_h(px((self.room - 48.0).max(80.0)))
-                    .overflow_y_scroll()
-                    .track_scroll(&self.scroll)
-                    .child(stat_row(
-                        &theme,
-                        "Contributions",
-                        snapshot.contributions,
-                        caption,
-                    ))
-                    .child(stat_row(
-                        &theme,
+                    .mb(px(4.0))
+                    .whitespace_nowrap()
+                    .text_size(crate::typography::ui_rems(14.0))
+                    .line_height(px(18.0))
+                    .font_weight(gpui::FontWeight::MEDIUM)
+                    .text_color(theme.text)
+                    .child(SharedString::from("Overview")),
+            )
+            .child(
+                div()
+                    .w_full()
+                    .flex()
+                    .flex_nowrap()
+                    .gap(px(16.0))
+                    .child(stat_column(theme, "Contributions", snapshot.contributions))
+                    .child(stat_column(
+                        theme,
                         "Pull requests opened",
                         snapshot.pull_requests_opened,
-                        caption,
                     ))
-                    .child(stat_row(
-                        &theme,
+                    .child(stat_column(
+                        theme,
                         "Pull requests merged",
                         snapshot.pull_requests_merged,
-                        caption,
                     ))
-                    .child(stat_row(&theme, "Reviews", snapshot.reviews, caption))
+                    .child(stat_column(theme, "Reviews", snapshot.reviews)),
+            )
+            .child(
+                div()
+                    .mt(px(10.0))
+                    .w_full()
+                    .flex()
+                    .flex_nowrap()
+                    .items_center()
+                    .justify_between()
                     .child(
                         div()
-                            .mt(px(12.0))
+                            .whitespace_nowrap()
                             .text_size(crate::typography::ui_rems(13.0))
+                            .line_height(px(18.0))
                             .text_color(theme.text)
                             .child(SharedString::from(format!(
                                 "{} contributions in the last year",
                                 grouped(snapshot.year_total)
                             ))),
                     )
-                    .child(heatmap(&snapshot, &theme, self.panel_width.get()))
-                    .child(
-                        div()
-                            .mt(px(14.0))
-                            .flex()
-                            .gap(px(16.0))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(10.0))
-                                    .child(metric(
-                                        &theme,
-                                        "Current streak",
-                                        day_count(snapshot.current_streak_days),
-                                        Some("Weekends don't break it".to_owned()),
-                                    ))
-                                    .child(metric(
-                                        &theme,
-                                        "Longest streak",
-                                        day_count(snapshot.longest_streak_days),
-                                        None,
-                                    )),
-                            )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .flex()
-                                    .flex_col()
-                                    .gap(px(10.0))
-                                    .child(metric(
-                                        &theme,
-                                        "Most active month",
-                                        month_value,
-                                        month_detail,
-                                    ))
-                                    .child(metric(
-                                        &theme,
-                                        "Most active day",
-                                        day_value,
-                                        day_detail,
-                                    )),
-                            ),
-                    )
-                    .when(snapshot.attention_count > 0, |body| {
-                        let url = attention_url.clone();
-                        body.child(div().mt(px(12.0)).h(px(1.0)).bg(theme.border))
-                            .child(
-                                div()
-                                    .mt(px(8.0))
-                                    .mb(px(4.0))
-                                    .flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .cursor_pointer()
-                                    .child(
-                                        div()
-                                            .text_size(crate::typography::ui_rems(13.0))
-                                            .text_color(theme.text)
-                                            .child(SharedString::from("Needs your attention")),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_size(crate::typography::ui_rems(13.0))
-                                            .font_weight(gpui::FontWeight::MEDIUM)
-                                            .text_color(theme.text)
-                                            .child(SharedString::from(attention_count)),
-                                    )
-                                    .id("github-activity-attention")
-                                    .on_click(cx.listener(move |_, _, _, cx| {
-                                        cx.open_url(&url);
-                                    })),
-                            )
-                    }),
+                    .child(heat_legend(theme)),
             )
+            .child(heatmap(snapshot, theme, cell))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{activity_mounts, day_count, format_delta, grouped};
+    use super::{PANEL_CHROME, activity_cell, format_delta, grouped, heat_cell, month_abbr};
 
     #[test]
     fn github_activity_groups_counts() {
@@ -801,15 +422,31 @@ mod tests {
         assert_eq!(format_delta(12), "+12");
         assert_eq!(format_delta(-25), "-25");
         assert_eq!(format_delta(1200), "+1,200");
-        assert_eq!(day_count(1), "1 day");
-        assert_eq!(day_count(52), "52 days");
     }
 
     #[test]
-    fn github_activity_mounts_with_room_and_snapshot() {
-        assert!(!activity_mounts(41.0, 150.0, false));
-        assert!(!activity_mounts(40.0, 400.0, true));
-        assert!(!activity_mounts(80.0, 149.0, true));
-        assert!(activity_mounts(80.0, 150.0, true));
+    fn github_activity_shows_only_when_it_fits() {
+        let cell = activity_cell(736.0, 53, 400.0).unwrap();
+        assert!(PANEL_CHROME + 7.0 * cell <= 400.0);
+        assert!(activity_cell(736.0, 53, 200.0).is_none());
+        assert!(activity_cell(480.0, 53, 400.0).is_none());
+        assert!(activity_cell(736.0, 0, 400.0).is_none());
+    }
+
+    #[test]
+    fn github_activity_heatmap_uses_the_panel_width() {
+        let cell = heat_cell(736.0, 53);
+        let used = 32.0 + 53.0 * cell + 52.0 * 2.0;
+        assert!((used - 736.0).abs() < 0.5, "{used}");
+        assert!(cell > 10.0);
+    }
+
+    #[test]
+    fn github_activity_month_labels_follow_the_date() {
+        assert_eq!(month_abbr("2026-01-02"), Some("Jan"));
+        assert_eq!(month_abbr("2026-06-01"), Some("Jun"));
+        assert_eq!(month_abbr("2026-12-31"), Some("Dec"));
+        assert_eq!(month_abbr("2026-13-01"), None);
+        assert_eq!(month_abbr("2026"), None);
     }
 }
