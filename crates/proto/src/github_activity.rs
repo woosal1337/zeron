@@ -1,4 +1,3 @@
-//! Wire types for the signed-in GitHub activity panel.
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

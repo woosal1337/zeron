@@ -1,4 +1,3 @@
-//! GitHub activity under the empty new-chat composer.
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Window, div, prelude::*, px};

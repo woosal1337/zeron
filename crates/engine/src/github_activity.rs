@@ -1,4 +1,3 @@
-//! The 30-day GitHub activity window and payload parsing.
 use chrono::{DateTime, Duration, NaiveDate, Utc};
 use serde_json::Value;
 use zeron_proto::{

@@ -11286,10 +11286,6 @@ impl Shell {
             )
             .children(session_card)
             .when_some(harness_update_card, |column, chip| {
-                // Home notices sit above the composer's destination selectors.
-                // Clip paint and hitboxes at the same measured terminal edge
-                // as the transcript, including during open/close motion;
-                // draw order alone would show them through the terminal glass.
                 let Some(bounds) = surface else {
                     return column;
                 };
