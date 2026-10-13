@@ -85,6 +85,12 @@ impl GitHubActivity {
         self.cell().is_some()
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_snapshot(&mut self, snapshot: GitHubActivitySnapshot) {
+        self.snapshot = Some(snapshot);
+        self.fetched_at = Some(Instant::now());
+    }
+
     fn cell(&self) -> Option<f32> {
         let columns = self.snapshot.as_ref()?.weeks.len();
         self.shown
@@ -301,20 +307,27 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
                 .gap(px(4.0))
                 .mb(px(2.0))
                 .child(div().w(px(28.0)))
-                .child(div().flex().gap(px(2.0)).children(month_marks.into_iter().map(
-                    |mark| {
-                        div().relative().w(px(cell)).h(px(14.0)).children(mark.map(|text| {
+                .child(
+                    div()
+                        .flex()
+                        .gap(px(2.0))
+                        .children(month_marks.into_iter().map(|mark| {
                             div()
-                                .absolute()
-                                .top_0()
-                                .left_0()
-                                .whitespace_nowrap()
-                                .text_size(crate::typography::ui_rems(11.0))
-                                .text_color(theme.text_muted)
-                                .child(SharedString::from(text))
-                        }))
-                    },
-                ))),
+                                .relative()
+                                .w(px(cell))
+                                .h(px(14.0))
+                                .children(mark.map(|text| {
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .left_0()
+                                        .whitespace_nowrap()
+                                        .text_size(crate::typography::ui_rems(11.0))
+                                        .text_color(theme.text_muted)
+                                        .child(SharedString::from(text))
+                                }))
+                        })),
+                ),
         )
         .child(
             div()
@@ -334,13 +347,17 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
                         .flex()
                         .gap(px(2.0))
                         .children(snapshot.weeks.iter().map(|week| {
-                            div().flex().flex_col().gap(px(2.0)).children((0..7).map(|row| {
-                                let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
-                                match week.days.iter().find(|day| day.weekday == row) {
-                                    Some(day) => tile.bg(heat_fill(theme, day.level)),
-                                    None => tile,
-                                }
-                            }))
+                            div()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.0))
+                                .children((0..7).map(|row| {
+                                    let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
+                                    match week.days.iter().find(|day| day.weekday == row) {
+                                        Some(day) => tile.bg(heat_fill(theme, day.level)),
+                                        None => tile,
+                                    }
+                                }))
                         })),
                 ),
         )
@@ -353,6 +370,7 @@ impl Render for GitHubActivity {
         };
         let theme = Theme::of(cx);
         div()
+            .debug_selector(|| "github-activity".into())
             .w_full()
             .child(
                 div()

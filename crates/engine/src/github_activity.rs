@@ -20,7 +20,10 @@ pub(crate) fn activity_variables(now: DateTime<Utc>) -> [(&'static str, String);
         ("yearFrom", stamp(today - Duration::days(364))),
         ("opened", format!("author:@me is:pr created:{current}")),
         ("openedPrev", format!("author:@me is:pr created:{previous}")),
-        ("merged", format!("author:@me is:pr is:merged merged:{current}")),
+        (
+            "merged",
+            format!("author:@me is:pr is:merged merged:{current}"),
+        ),
         (
             "mergedPrev",
             format!("author:@me is:pr is:merged merged:{previous}"),
@@ -118,7 +121,11 @@ fn parse_day(value: &Value) -> Option<GitHubActivityDay> {
 #[cfg(test)]
 pub(crate) fn test_activity_payload() -> String {
     let day = |date, level, weekday| {
-        serde_json::json!({ "date": date, "contributionLevel": level, "weekday": weekday })
+        serde_json::json!({
+            "date": date,
+            "contributionLevel": level,
+            "weekday": weekday
+        })
     };
     serde_json::json!({
         "data": {
@@ -188,10 +195,11 @@ mod tests {
     fn parse_reads_counts_and_the_calendar() {
         let payload: Value = serde_json::from_str(&test_activity_payload()).unwrap();
         let snapshot = parse_activity(&payload).unwrap();
-        assert_eq!(snapshot.contributions, GitHubActivityStat { count: 10, delta: 6 });
-        assert_eq!(snapshot.pull_requests_opened, GitHubActivityStat { count: 5, delta: 2 });
-        assert_eq!(snapshot.pull_requests_merged, GitHubActivityStat { count: 2, delta: 0 });
-        assert_eq!(snapshot.reviews, GitHubActivityStat { count: 1, delta: -2 });
+        let counts = |stat: GitHubActivityStat| (stat.count, stat.delta);
+        assert_eq!(counts(snapshot.contributions), (10, 6));
+        assert_eq!(counts(snapshot.pull_requests_opened), (5, 2));
+        assert_eq!(counts(snapshot.pull_requests_merged), (2, 0));
+        assert_eq!(counts(snapshot.reviews), (1, -2));
         assert_eq!(snapshot.year_total, 42);
         assert_eq!(snapshot.weeks.len(), 2);
         assert_eq!(snapshot.weeks[1].days[1].level, 4);
