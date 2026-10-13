@@ -357,6 +357,7 @@ pub struct GitHubCli {
     store: Option<crate::change_request_store::ChangeRequestStore>,
     /// The active `gh` account and when it was read, keying the store.
     account: Arc<tokio::sync::Mutex<Option<(Instant, Option<String>)>>>,
+    activity_path: Option<PathBuf>,
 }
 
 impl GitHubCli {
@@ -765,7 +766,22 @@ impl GitHubCli {
     pub(crate) async fn github_activity(
         &self,
         refresh: bool,
+        cached: bool,
     ) -> Result<zeron_proto::GitHubActivitySnapshot, ChangeRequestError> {
+        let stored = match &self.activity_path {
+            Some(path) => self
+                .store_account()
+                .await
+                .map(|account| (path.clone(), account)),
+            None => None,
+        };
+        if cached
+            && !refresh
+            && let Some((path, account)) = &stored
+            && let Some(snapshot) = crate::github_activity::load_stored(path, account).await
+        {
+            return Ok(snapshot);
+        }
         let now = Utc::now();
         let github = self.clone();
         let payload = self
@@ -773,7 +789,12 @@ impl GitHubCli {
                 github.fetch_github_activity(now).await
             })
             .await?;
-        crate::github_activity::parse_activity(&payload).ok_or(ChangeRequestError::Decode)
+        let snapshot =
+            crate::github_activity::parse_activity(&payload).ok_or(ChangeRequestError::Decode)?;
+        if let Some((path, account)) = stored {
+            crate::github_activity::store(&path, &account, &snapshot).await;
+        }
+        Ok(snapshot)
     }
 
     async fn fetch_github_activity(
@@ -829,6 +850,7 @@ impl GitHubCli {
             pr_cache: Default::default(),
             store: None,
             account: Default::default(),
+            activity_path: None,
         }
     }
 
@@ -837,6 +859,7 @@ impl GitHubCli {
         self.store = Some(crate::change_request_store::ChangeRequestStore::new(
             data_dir,
         ));
+        self.activity_path = Some(data_dir.join("github-activity.json"));
         self
     }
 
@@ -2289,10 +2312,10 @@ mod tests {
         let payload = crate::github_activity::test_activity_payload();
         let runner = FakeProcessRunner::with_responses([command_success(payload)]);
         let github = GitHubCli::with_runner(runner.clone() as std::sync::Arc<dyn ProcessRunner>);
-        let first = github.github_activity(false).await.unwrap();
+        let first = github.github_activity(false, false).await.unwrap();
         assert_eq!(first.contributions.count, 10);
         assert_eq!(first.pull_requests_opened.count, 5);
-        let again = github.github_activity(false).await.unwrap();
+        let again = github.github_activity(false, false).await.unwrap();
         assert_eq!(again, first);
         assert_eq!(runner.requests().len(), 1);
         let args = runner.requests()[0].args.join(" ");
@@ -2309,6 +2332,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_activity_is_stored_on_disk_and_served_when_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let runner = FakeProcessRunner::with_responses([
+            command_success("me\n"),
+            command_success(crate::github_activity::test_activity_payload()),
+        ]);
+        let github = GitHubCli::with_runner(runner.clone()).with_store(dir.path());
+        let first = github.github_activity(false, true).await.unwrap();
+        let relaunched = GitHubCli::with_runner(runner.clone()).with_store(dir.path());
+        *relaunched.account.lock().await = Some((Instant::now(), Some("me".into())));
+        assert_eq!(relaunched.github_activity(false, true).await.unwrap(), first);
+        assert_eq!(runner.requests().len(), 2);
+        let path = dir.path().join("github-activity.json");
+        assert!(
+            crate::github_activity::load_stored(&path, "other")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
     async fn github_activity_reports_auth_and_missing_cli() {
         let auth = FakeProcessRunner::with_responses([Ok(ProcessOutput {
             success: false,
@@ -2317,13 +2361,13 @@ mod tests {
             stdout_truncated: false,
         })]);
         let github = GitHubCli::with_runner(auth as std::sync::Arc<dyn ProcessRunner>);
-        let error = github.github_activity(false).await.unwrap_err();
+        let error = github.github_activity(false, false).await.unwrap_err();
         assert_eq!(error, ChangeRequestError::Authentication);
         let missing = FakeProcessRunner::with_responses([Err(ProcessRunError::Spawn(
             std::io::ErrorKind::NotFound,
         ))]);
         let github = GitHubCli::with_runner(missing as std::sync::Arc<dyn ProcessRunner>);
-        let error = github.github_activity(false).await.unwrap_err();
+        let error = github.github_activity(false, false).await.unwrap_err();
         assert_eq!(error, ChangeRequestError::CliUnavailable);
     }
 
@@ -2339,7 +2383,7 @@ mod tests {
             stdout_truncated: false,
         })]);
         let github = GitHubCli::with_runner(runner as std::sync::Arc<dyn ProcessRunner>);
-        let snapshot = github.github_activity(false).await.unwrap();
+        let snapshot = github.github_activity(false, false).await.unwrap();
         assert_eq!(snapshot.contributions.count, 10);
         assert_eq!(snapshot.reviews.count, 1);
     }

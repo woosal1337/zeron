@@ -2604,11 +2604,13 @@ impl RpcService for EngineRpc {
                 struct P {
                     #[serde(default)]
                     refresh: bool,
+                    #[serde(default)]
+                    cached: bool,
                 }
                 let p: P = parse_params(params)?;
                 let snapshot = self
                     .github
-                    .github_activity(p.refresh)
+                    .github_activity(p.refresh, p.cached)
                     .await
                     .map_err(change_request_rpc_error)?;
                 RpcReply::value(&snapshot)

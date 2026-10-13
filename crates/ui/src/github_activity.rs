@@ -111,14 +111,15 @@ impl GitHubActivity {
         let Some(engine) = self.state.read(cx).engine().cloned() else {
             return;
         };
-        let refresh = force || self.snapshot.is_some();
+        let cached = self.snapshot.is_none();
+        let refresh = force || !cached;
         self.loading = true;
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
                 .call(
                     methods::GET_GITHUB_ACTIVITY,
-                    serde_json::json!({ "refresh": refresh }),
+                    serde_json::json!({ "refresh": refresh, "cached": cached }),
                 )
                 .await
                 .ok()
@@ -128,7 +129,7 @@ impl GitHubActivity {
                 match result {
                     Some(snapshot) => {
                         this.snapshot = Some(snapshot);
-                        this.fetched_at = Some(Instant::now());
+                        this.fetched_at = (!cached).then(Instant::now);
                         this.failed_at = None;
                     }
                     None => this.failed_at = Some(Instant::now()),

@@ -1,4 +1,7 @@
+use std::path::Path;
+
 use chrono::{DateTime, Duration, NaiveDate, Utc};
+use serde::Deserialize;
 use serde_json::Value;
 use zeron_proto::{
     GitHubActivityDay, GitHubActivitySnapshot, GitHubActivityStat, GitHubActivityWeek,
@@ -51,6 +54,28 @@ pub(crate) fn parse_activity(payload: &Value) -> Option<GitHubActivitySnapshot> 
         reviews: stat(u32_at(current, &reviews)?, u32_at(previous, &reviews)?),
         weeks: parse_weeks(calendar)?,
     })
+}
+
+#[derive(Deserialize)]
+struct StoredActivity {
+    account: String,
+    snapshot: GitHubActivitySnapshot,
+}
+
+pub(crate) async fn load_stored(path: &Path, account: &str) -> Option<GitHubActivitySnapshot> {
+    let stored: StoredActivity = serde_json::from_slice(&tokio::fs::read(path).await.ok()?).ok()?;
+    (stored.account == account).then_some(stored.snapshot)
+}
+
+pub(crate) async fn store(path: &Path, account: &str, snapshot: &GitHubActivitySnapshot) {
+    let stored = serde_json::json!({ "account": account, "snapshot": snapshot });
+    let Ok(bytes) = serde_json::to_vec(&stored) else {
+        return;
+    };
+    let temp = path.with_extension("tmp");
+    if tokio::fs::write(&temp, bytes).await.is_ok() {
+        let _ = tokio::fs::rename(&temp, path).await;
+    }
 }
 
 fn stamp(date: NaiveDate) -> String {
