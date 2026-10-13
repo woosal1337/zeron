@@ -178,34 +178,14 @@ fn stat_column(theme: &Theme, label: &str, stat: GitHubActivityStat) -> gpui::Di
         )
         .child(
             div()
-                .flex()
-                .flex_nowrap()
-                .items_center()
                 .h(px(16.0))
-                .gap(px(4.0))
                 .whitespace_nowrap()
+                .text_size(crate::typography::ui_rems(12.0))
+                .line_height(px(16.0))
+                .text_color(delta_color(theme, stat.delta))
                 .when(stat.delta != 0, |row| {
-                    row.child(
-                        div()
-                            .flex_none()
-                            .w(px(6.0))
-                            .h(px(6.0))
-                            .rounded(px(3.0))
-                            .bg(delta_color(theme, stat.delta)),
-                    )
-                })
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(delta_color(theme, stat.delta))
-                        .child(SharedString::from(format_delta(stat.delta))),
-                )
-                .child(
-                    div()
-                        .text_size(crate::typography::ui_rems(12.0))
-                        .text_color(theme.text_muted)
-                        .child(SharedString::from("vs last month")),
-                ),
+                    row.child(SharedString::from(format_delta(stat.delta)))
+                }),
         )
 }
 
@@ -221,7 +201,7 @@ fn heat_fill(theme: &Theme, level: u8) -> gpui::Rgba {
 fn heat_cell(width: f32, columns: usize) -> f32 {
     let columns = columns.max(1) as f32;
     let gaps = (columns - 1.0).max(0.0) * 2.0;
-    ((width - 32.0 - gaps) / columns).max(2.0)
+    ((width - gaps) / columns).max(2.0)
 }
 
 fn activity_cell(width: f32, columns: usize, room: f32) -> Option<f32> {
@@ -241,29 +221,6 @@ fn month_abbr(date: &str) -> Option<&'static str> {
     .copied()
 }
 
-fn heat_legend(theme: &Theme) -> gpui::Div {
-    let caption = |text: &'static str| {
-        div()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .child(SharedString::from(text))
-    };
-    div()
-        .flex()
-        .flex_none()
-        .items_center()
-        .gap(px(4.0))
-        .child(caption("Less"))
-        .children((0..5).map(|level| {
-            div()
-                .w(px(10.0))
-                .h(px(10.0))
-                .rounded(px(2.0))
-                .bg(heat_fill(theme, level))
-        }))
-        .child(caption("More"))
-}
-
 fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui::Div {
     let month_marks = snapshot.weeks.iter().map(|week| {
         week.days
@@ -271,25 +228,15 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
             .find(|day| day.date.ends_with("-01"))
             .and_then(|day| month_abbr(&day.date))
     });
-    let label = |text: &'static str| {
-        div()
-            .h(px(cell))
-            .flex()
-            .items_center()
-            .text_size(crate::typography::ui_rems(11.0))
-            .text_color(theme.text_muted)
-            .child(SharedString::from(text))
-    };
     div()
         .mt(px(4.0))
         .w_full()
         .child(
             div()
                 .flex()
-                .gap(px(4.0))
+                .gap(px(2.0))
                 .mb(px(2.0))
-                .child(div().w(px(28.0)))
-                .child(div().flex().gap(px(2.0)).children(month_marks.map(|mark| {
+                .children(month_marks.map(|mark| {
                     div()
                         .relative()
                         .w(px(cell))
@@ -304,39 +251,25 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
                                 .text_color(theme.text_muted)
                                 .child(SharedString::from(text))
                         }))
-                }))),
+                })),
         )
         .child(
             div()
                 .flex()
-                .w_full()
-                .gap(px(4.0))
-                .child(
+                .gap(px(2.0))
+                .children(snapshot.weeks.iter().map(|week| {
                     div()
-                        .w(px(28.0))
                         .flex()
                         .flex_col()
                         .gap(px(2.0))
-                        .children(["", "Mon", "", "Wed", "", "Fri", ""].map(label)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .gap(px(2.0))
-                        .children(snapshot.weeks.iter().map(|week| {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .gap(px(2.0))
-                                .children((0..7).map(|row| {
-                                    let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
-                                    match week.days.iter().find(|day| day.weekday == row) {
-                                        Some(day) => tile.bg(heat_fill(theme, day.level)),
-                                        None => tile,
-                                    }
-                                }))
-                        })),
-                ),
+                        .children((0..7).map(|row| {
+                            let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
+                            match week.days.iter().find(|day| day.weekday == row) {
+                                Some(day) => tile.bg(heat_fill(theme, day.level)),
+                                None => tile,
+                            }
+                        }))
+                })),
         )
 }
 
@@ -357,7 +290,7 @@ impl Render for GitHubActivity {
                     .line_height(px(18.0))
                     .font_weight(gpui::FontWeight::MEDIUM)
                     .text_color(theme.text)
-                    .child(SharedString::from("Overview")),
+                    .child(SharedString::from("Last 30 days")),
             )
             .child(
                 div()
@@ -368,12 +301,12 @@ impl Render for GitHubActivity {
                     .child(stat_column(theme, "Contributions", snapshot.contributions))
                     .child(stat_column(
                         theme,
-                        "Pull requests opened",
+                        "PRs opened",
                         snapshot.pull_requests_opened,
                     ))
                     .child(stat_column(
                         theme,
-                        "Pull requests merged",
+                        "PRs merged",
                         snapshot.pull_requests_merged,
                     ))
                     .child(stat_column(theme, "Reviews", snapshot.reviews)),
@@ -381,23 +314,14 @@ impl Render for GitHubActivity {
             .child(
                 div()
                     .mt(px(10.0))
-                    .w_full()
-                    .flex()
-                    .flex_nowrap()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .whitespace_nowrap()
-                            .text_size(crate::typography::ui_rems(13.0))
-                            .line_height(px(18.0))
-                            .text_color(theme.text)
-                            .child(SharedString::from(format!(
-                                "{} contributions in the last year",
-                                grouped(snapshot.year_total)
-                            ))),
-                    )
-                    .child(heat_legend(theme)),
+                    .whitespace_nowrap()
+                    .text_size(crate::typography::ui_rems(13.0))
+                    .line_height(px(18.0))
+                    .text_color(theme.text)
+                    .child(SharedString::from(format!(
+                        "{} contributions in the last year",
+                        grouped(snapshot.year_total)
+                    ))),
             )
             .child(heatmap(snapshot, theme, cell))
     }
@@ -431,7 +355,7 @@ mod tests {
     #[test]
     fn github_activity_heatmap_uses_the_panel_width() {
         let cell = heat_cell(736.0, 53);
-        let used = 32.0 + 53.0 * cell + 52.0 * 2.0;
+        let used = 53.0 * cell + 52.0 * 2.0;
         assert!((used - 736.0).abs() < 0.5, "{used}");
         assert!(cell > 10.0);
     }
