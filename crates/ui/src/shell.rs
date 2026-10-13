@@ -11191,7 +11191,8 @@ impl Shell {
             .surface_bounds()
             .get()
             .filter(|bounds| f32::from(bounds.size.height) > 40.0);
-        let activity_home = matches!(self.route, Route::Chat)
+        let activity_home = ui_settings.github_activity
+            && matches!(self.route, Route::Chat)
             && (has_spaces || no_project || has_appshots)
             && dock_frame.selectors() > 0.001
             && (!has_selection || dock_frame.active);
@@ -16611,6 +16612,20 @@ mod exit_regressions {
         assert!(
             !shown.contains(&(1512.0, 560.0)),
             "the panel hides in a short window: {shown:?}"
+        );
+        cx.update(|_, cx| {
+            settings::update(settings::SavePolicy::Immediate, cx, |settings| {
+                settings.github_activity = false
+            })
+        });
+        cx.simulate_resize(gpui::size(px(1512.0), px(903.0)));
+        for _ in 0..3 {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear());
+        }
+        assert!(
+            cx.debug_bounds("github-activity").is_none(),
+            "the setting hides the panel"
         );
     }
 
