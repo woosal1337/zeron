@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use gpui::{Context, Entity, IntoElement, Render, SharedString, Window, div, prelude::*, px};
-use zeron_proto::{GitHubActivitySnapshot, GitHubActivityStat};
+use zeron_proto::{GitHubActivitySnapshot, GitHubActivityWeek};
 use zeron_rpc::methods;
 
 use crate::state::AppState;
@@ -12,6 +12,8 @@ const PANEL_CHROME: f32 = 146.0;
 const REFRESH_AFTER: Duration = Duration::from_secs(5 * 60);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 const IDLE_REFRESH: Duration = Duration::from_secs(30);
+const SKELETON_AFTER: Duration = Duration::from_millis(200);
+const SKELETON_WEEKS: usize = 53;
 
 fn grouped(value: u32) -> String {
     let digits = value.to_string();
@@ -45,7 +47,7 @@ pub struct GitHubActivity {
     fetched_at: Option<Instant>,
     failed_at: Option<Instant>,
     hidden_at: Option<Instant>,
-    loading: bool,
+    loading_since: Option<Instant>,
 }
 
 impl GitHubActivity {
@@ -59,7 +61,7 @@ impl GitHubActivity {
             fetched_at: None,
             failed_at: None,
             hidden_at: None,
-            loading: false,
+            loading_since: None,
         }
     }
 
@@ -91,14 +93,24 @@ impl GitHubActivity {
     }
 
     fn cell(&self) -> Option<f32> {
-        let columns = self.snapshot.as_ref()?.weeks.len();
+        let columns = match &self.snapshot {
+            Some(snapshot) => snapshot.weeks.len(),
+            None if self.failed_at.is_none()
+                && self
+                    .loading_since
+                    .is_some_and(|at| at.elapsed() >= SKELETON_AFTER) =>
+            {
+                SKELETON_WEEKS
+            }
+            None => return None,
+        };
         self.shown
             .then(|| activity_cell(self.width, columns, self.room))
             .flatten()
     }
 
     fn ensure(&mut self, force: bool, cx: &mut Context<Self>) {
-        if self.loading {
+        if self.loading_since.is_some() {
             return;
         }
         let fresh = self
@@ -113,7 +125,14 @@ impl GitHubActivity {
         };
         let cached = self.snapshot.is_none();
         let refresh = force || !cached;
-        self.loading = true;
+        self.loading_since = Some(Instant::now());
+        if cached {
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SKELETON_AFTER).await;
+                this.update(cx, |_, cx| cx.notify()).ok();
+            })
+            .detach();
+        }
         cx.spawn(async move |this, cx| {
             let result = engine
                 .client()
@@ -125,7 +144,7 @@ impl GitHubActivity {
                 .ok()
                 .and_then(|value| serde_json::from_value::<GitHubActivitySnapshot>(value).ok());
             this.update(cx, |this, cx| {
-                this.loading = false;
+                this.loading_since = None;
                 match result {
                     Some(snapshot) => {
                         this.snapshot = Some(snapshot);
@@ -152,7 +171,7 @@ fn delta_color(theme: &Theme, delta: i32) -> gpui::Hsla {
     }
 }
 
-fn stat_column(theme: &Theme, label: &str, stat: GitHubActivityStat) -> gpui::Div {
+fn stat_column(theme: &Theme, label: &str, count: gpui::Div, delta: i32) -> gpui::Div {
     div()
         .flex_1()
         .min_w_0()
@@ -167,24 +186,16 @@ fn stat_column(theme: &Theme, label: &str, stat: GitHubActivityStat) -> gpui::Di
                 .text_color(theme.text_muted)
                 .child(SharedString::from(label.to_owned())),
         )
-        .child(
-            div()
-                .whitespace_nowrap()
-                .text_size(crate::typography::ui_rems(22.0))
-                .line_height(px(26.0))
-                .font_weight(gpui::FontWeight::MEDIUM)
-                .text_color(theme.text)
-                .child(SharedString::from(grouped(stat.count))),
-        )
+        .child(div().h(px(26.0)).flex().items_center().child(count))
         .child(
             div()
                 .h(px(16.0))
                 .whitespace_nowrap()
                 .text_size(crate::typography::ui_rems(12.0))
                 .line_height(px(16.0))
-                .text_color(delta_color(theme, stat.delta))
-                .when(stat.delta != 0, |row| {
-                    row.child(SharedString::from(format_delta(stat.delta)))
+                .text_color(delta_color(theme, delta))
+                .when(delta != 0, |row| {
+                    row.child(SharedString::from(format_delta(delta)))
                 }),
         )
 }
@@ -221,11 +232,13 @@ fn month_abbr(date: &str) -> Option<&'static str> {
     .copied()
 }
 
-fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui::Div {
-    let month_marks = snapshot.weeks.iter().map(|week| {
-        week.days
-            .iter()
-            .find(|day| day.date.ends_with("-01"))
+fn heatmap(weeks: Option<&[GitHubActivityWeek]>, theme: &Theme, cell: f32) -> gpui::Div {
+    let weeks: Vec<Option<&GitHubActivityWeek>> = match weeks {
+        Some(weeks) => weeks.iter().map(Some).collect(),
+        None => vec![None; SKELETON_WEEKS],
+    };
+    let month_marks = weeks.iter().map(|week| {
+        week.and_then(|week| week.days.iter().find(|day| day.date.ends_with("-01")))
             .and_then(|day| month_abbr(&day.date))
     });
     div()
@@ -253,32 +266,60 @@ fn heatmap(snapshot: &GitHubActivitySnapshot, theme: &Theme, cell: f32) -> gpui:
                         }))
                 })),
         )
-        .child(
+        .child(div().flex().gap(px(2.0)).children(weeks.iter().map(|week| {
             div()
                 .flex()
+                .flex_col()
                 .gap(px(2.0))
-                .children(snapshot.weeks.iter().map(|week| {
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.0))
-                        .children((0..7).map(|row| {
-                            let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
-                            match week.days.iter().find(|day| day.weekday == row) {
-                                Some(day) => tile.bg(heat_fill(theme, day.level)),
-                                None => tile,
-                            }
-                        }))
-                })),
-        )
+                .children((0..7).map(|row| {
+                    let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
+                    let level = match week {
+                        Some(week) => week
+                            .days
+                            .iter()
+                            .find(|day| day.weekday == row)
+                            .map(|day| day.level),
+                        None => Some(0),
+                    };
+                    match level {
+                        Some(level) => tile.bg(heat_fill(theme, level)),
+                        None => tile,
+                    }
+                }))
+        })))
 }
 
 impl Render for GitHubActivity {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let (Some(snapshot), Some(cell)) = (self.snapshot.as_ref(), self.cell()) else {
+        let Some(cell) = self.cell() else {
             return div();
         };
-        let theme = Theme::of(cx);
+        let theme = Theme::of(cx).clone();
+        let view = cx.entity_id();
+        let snapshot = self.snapshot.as_ref();
+        let pulse = match snapshot {
+            Some(_) => 1.0,
+            None => {
+                let delta = crate::motion::pulse_delta(&crate::motion::ZERON_PULSE, view, cx);
+                let phase = crate::motion::staggered_phase(delta, 4, 0.08);
+                0.45 + 0.4 * crate::motion::pulse_wave(phase)
+            }
+        };
+        let stats = [
+            (
+                "Contributions",
+                snapshot.map(|snapshot| snapshot.contributions),
+            ),
+            (
+                "PRs opened",
+                snapshot.map(|snapshot| snapshot.pull_requests_opened),
+            ),
+            (
+                "PRs merged",
+                snapshot.map(|snapshot| snapshot.pull_requests_merged),
+            ),
+            ("Reviews", snapshot.map(|snapshot| snapshot.reviews)),
+        ];
         div()
             .debug_selector(|| "github-activity".into())
             .w_full()
@@ -292,26 +333,36 @@ impl Render for GitHubActivity {
                     .text_color(theme.text)
                     .child(SharedString::from("Last 30 days")),
             )
+            .child(div().w_full().flex().flex_nowrap().gap(px(16.0)).children(
+                stats.into_iter().enumerate().map(|(index, (label, stat))| {
+                    let count = match stat {
+                        Some(stat) => div()
+                            .whitespace_nowrap()
+                            .text_size(crate::typography::ui_rems(22.0))
+                            .line_height(px(26.0))
+                            .font_weight(gpui::FontWeight::MEDIUM)
+                            .text_color(theme.text)
+                            .child(SharedString::from(grouped(stat.count))),
+                        None => crate::pull_request_skeleton::bar(
+                            px(56.0),
+                            18.0,
+                            index,
+                            view,
+                            &theme,
+                            cx,
+                        ),
+                    };
+                    stat_column(&theme, label, count, stat.map_or(0, |stat| stat.delta))
+                }),
+            ))
             .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .flex_nowrap()
-                    .gap(px(16.0))
-                    .child(stat_column(theme, "Contributions", snapshot.contributions))
-                    .child(stat_column(
-                        theme,
-                        "PRs opened",
-                        snapshot.pull_requests_opened,
-                    ))
-                    .child(stat_column(
-                        theme,
-                        "PRs merged",
-                        snapshot.pull_requests_merged,
-                    ))
-                    .child(stat_column(theme, "Reviews", snapshot.reviews)),
+                heatmap(
+                    snapshot.map(|snapshot| snapshot.weeks.as_slice()),
+                    &theme,
+                    cell,
+                )
+                .opacity(pulse),
             )
-            .child(heatmap(snapshot, theme, cell))
     }
 }
 
