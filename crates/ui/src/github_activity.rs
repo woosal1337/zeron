@@ -14,6 +14,8 @@ const RETRY_AFTER: Duration = Duration::from_secs(60);
 const IDLE_REFRESH: Duration = Duration::from_secs(30);
 const SKELETON_AFTER: Duration = Duration::from_millis(200);
 const SKELETON_WEEKS: usize = 53;
+const REVEAL_STEP: f32 = 0.01;
+const REVEAL_FADE: f32 = 0.3;
 
 fn grouped(value: u32) -> String {
     let digits = value.to_string();
@@ -48,6 +50,7 @@ pub struct GitHubActivity {
     failed_at: Option<Instant>,
     hidden_at: Option<Instant>,
     loading_since: Option<Instant>,
+    revealed_at: Option<Instant>,
 }
 
 impl GitHubActivity {
@@ -62,6 +65,7 @@ impl GitHubActivity {
             failed_at: None,
             hidden_at: None,
             loading_since: None,
+            revealed_at: None,
         }
     }
 
@@ -147,6 +151,9 @@ impl GitHubActivity {
                 this.loading_since = None;
                 match result {
                     Some(snapshot) => {
+                        if this.snapshot.is_none() {
+                            this.revealed_at = Some(Instant::now());
+                        }
                         this.snapshot = Some(snapshot);
                         this.fetched_at = (!cached).then(Instant::now);
                         this.failed_at = None;
@@ -232,7 +239,18 @@ fn month_abbr(date: &str) -> Option<&'static str> {
     .copied()
 }
 
-fn heatmap(weeks: Option<&[GitHubActivityWeek]>, theme: &Theme, cell: f32) -> gpui::Div {
+fn reveal(elapsed: f32, column: usize) -> f32 {
+    crate::motion::EASE_OUT
+        .eval(((elapsed - column as f32 * REVEAL_STEP) / REVEAL_FADE).clamp(0.0, 1.0))
+}
+
+fn heatmap(
+    weeks: Option<&[GitHubActivityWeek]>,
+    theme: &Theme,
+    cell: f32,
+    elapsed: f32,
+) -> gpui::Div {
+    let empty: gpui::Hsla = heat_fill(theme, 0).into();
     let weeks: Vec<Option<&GitHubActivityWeek>> = match weeks {
         Some(weeks) => weeks.iter().map(Some).collect(),
         None => vec![None; SKELETON_WEEKS],
@@ -249,8 +267,9 @@ fn heatmap(weeks: Option<&[GitHubActivityWeek]>, theme: &Theme, cell: f32) -> gp
                 .flex()
                 .gap(px(2.0))
                 .mb(px(2.0))
-                .children(month_marks.map(|mark| {
+                .children(month_marks.enumerate().map(|(column, mark)| {
                     div()
+                        .opacity(reveal(elapsed, column))
                         .relative()
                         .w(px(cell))
                         .h(px(14.0))
@@ -266,37 +285,53 @@ fn heatmap(weeks: Option<&[GitHubActivityWeek]>, theme: &Theme, cell: f32) -> gp
                         }))
                 })),
         )
-        .child(div().flex().gap(px(2.0)).children(weeks.iter().map(|week| {
+        .child(
             div()
                 .flex()
-                .flex_col()
                 .gap(px(2.0))
-                .children((0..7).map(|row| {
-                    let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
-                    let level = match week {
-                        Some(week) => week
-                            .days
-                            .iter()
-                            .find(|day| day.weekday == row)
-                            .map(|day| day.level),
-                        None => Some(0),
-                    };
-                    match level {
-                        Some(level) => tile.bg(heat_fill(theme, level)),
-                        None => tile,
-                    }
-                }))
-        })))
+                .children(weeks.iter().enumerate().map(|(column, week)| {
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.0))
+                        .children((0..7).map(|row| {
+                            let tile = div().w(px(cell)).h(px(cell)).rounded(px(2.0));
+                            let level = match week {
+                                Some(week) => week
+                                    .days
+                                    .iter()
+                                    .find(|day| day.weekday == row)
+                                    .map(|day| day.level),
+                                None => Some(0),
+                            };
+                            match level {
+                                Some(level) => tile.bg(crate::motion::mix(
+                                    empty,
+                                    heat_fill(theme, level).into(),
+                                    reveal(elapsed, column),
+                                )),
+                                None => tile,
+                            }
+                        }))
+                })),
+        )
 }
 
 impl Render for GitHubActivity {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let Some(cell) = self.cell() else {
             return div();
         };
         let theme = Theme::of(cx).clone();
         let view = cx.entity_id();
         let snapshot = self.snapshot.as_ref();
+        let elapsed = match self.revealed_at {
+            Some(at) if !cx.reduce_motion() => at.elapsed().as_secs_f32(),
+            _ => f32::INFINITY,
+        };
+        if elapsed < SKELETON_WEEKS as f32 * REVEAL_STEP + REVEAL_FADE {
+            window.request_animation_frame();
+        }
         let pulse = match snapshot {
             Some(_) => 1.0,
             None => {
@@ -342,6 +377,7 @@ impl Render for GitHubActivity {
                             .line_height(px(26.0))
                             .font_weight(gpui::FontWeight::MEDIUM)
                             .text_color(theme.text)
+                            .opacity(reveal(elapsed, 0))
                             .child(SharedString::from(grouped(stat.count))),
                         None => crate::pull_request_skeleton::bar(
                             px(56.0),
@@ -360,6 +396,7 @@ impl Render for GitHubActivity {
                     snapshot.map(|snapshot| snapshot.weeks.as_slice()),
                     &theme,
                     cell,
+                    elapsed,
                 )
                 .opacity(pulse),
             )
@@ -368,7 +405,9 @@ impl Render for GitHubActivity {
 
 #[cfg(test)]
 mod tests {
-    use super::{PANEL_CHROME, activity_cell, format_delta, grouped, heat_cell, month_abbr};
+    use super::{
+        PANEL_CHROME, activity_cell, format_delta, grouped, heat_cell, month_abbr, reveal,
+    };
 
     #[test]
     fn github_activity_groups_counts() {
@@ -389,6 +428,16 @@ mod tests {
         assert!(activity_cell(736.0, 53, 200.0).is_none());
         assert!(activity_cell(480.0, 53, 400.0).is_none());
         assert!(activity_cell(736.0, 0, 400.0).is_none());
+    }
+
+    #[test]
+    fn github_activity_fills_the_heatmap_from_left_to_right() {
+        assert_eq!(reveal(0.0, 0), 0.0);
+        assert_eq!(reveal(0.3, 0), 1.0);
+        assert_eq!(reveal(0.82, 52), 1.0);
+        assert_eq!(reveal(f32::INFINITY, 52), 1.0);
+        assert!(reveal(0.15, 0) > reveal(0.15, 10));
+        assert_eq!(reveal(0.05, 10), 0.0);
     }
 
     #[test]
